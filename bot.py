@@ -1,121 +1,128 @@
-import discord
-import ollama
+import os
 import re
-
 from collections import deque
 
-
-
-##### SETUP #####
-
-#change name to ollama model name
-desiredModel = 'mistral-nemo' #mistral nemo is my recommendation, but you can replace this with whatever ollama model you want so long as it's installed properly on your system
-
-#put discord bot token here
-DISCORD_TOKEN = 'replace with token'
-
-#put discord channel id here
-target_channel_id = 123123234234
-
-#NOTE THAT THERE IS MORE TO CHANGE BELOW, MOST IMPORTANTLY THE CHARACTER DESCRIPTION.
-##################
+import discord
+import ollama
+from dotenv import load_dotenv
+from requests.exceptions import ConnectionError as ReqConnectionError
 
 
 
+# ---------------------------------------------------------------------------
+#  Setup & config
+# ---------------------------------------------------------------------------
 
-#stored messages
-user_messages = {}
 
-#initialization
+load_dotenv()
+
+# OVERRIDE
+os.environ['OLLAMA_HOST'] = 'http://127.0.0.1:11434'
+
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+OLLAMA_ENDPOINT = os.getenv("OLLAMA_HOST")
+desired_model = os.getenv("OLLAMA_MODEL")
+TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID"))
+
+print(f"OLLAMA_ENDPOINT is set to: {OLLAMA_ENDPOINT}")
+
+if not DISCORD_TOKEN:
+    raise RuntimeError("DISCORD_TOKEN not set. Export it or place it in a .env file.")
+
+
+
+# ---------------------------------------------------------------------------
+#  Initialise Ollama & Discord
+# ---------------------------------------------------------------------------
+ollama_client = ollama.Client(host=OLLAMA_ENDPOINT) # Initialize AFTER setting the env var
+
 intents = discord.Intents.default()
-intents.message_content = True  #required to read message content
+intents.message_content = True
 client = discord.Client(intents=intents)
 
-def generate_response(user_id, user_message):
-    if user_id in user_messages:
-        last_messages = list(user_messages[user_id])[-2:] # this saves last 2 user messages
-    else:
-        last_messages = []
+user_messages: dict[int, deque[str]] = {}
 
-    ###### PUT CHARACTER DESCRIPTION HERE ########
-    character_description = """
-    You are [insert name], a user on Discord. [Insert background here].
-    
-    [Insert other important info, such as chat examples, mannerisms, and bot instructions]
 
-    """
 
-    #plug in name here
-    conversation = "You are a discord user named [name]\n" + character_description
 
-    #adds last messages to context
-    for msg in last_messages:
-        conversation += f"\nUser: {msg}"
+# ---------------------------------------------------------------------------
+#  Helper func.
+# ---------------------------------------------------------------------------
 
-    #add newest message
-    conversation += f"\nUser: {user_message}\nKrypt:"
+def generate_response(user_id: int, user_message: str) -> str:
+    """Send the conversation to Ollama and return Krypt's reply."""
 
-    #gets response from the model
+    history = list(user_messages.get(user_id, []))[-2:]
+
+    character_description = (
+        "Insert description of character HERE" 
+    )
+
+    conversation = [
+        {"role": "user", "content": "You are a discord user named Krypt.\n" + character_description}
+    ]
+
+    for msg in history:
+        conversation.append({"role": "user", "content": msg})
+
+    conversation.append({"role": "user", "content": user_message})
+
     try:
-        response = ollama.chat(model=desiredModel, messages=[{'role': 'user', 'content': conversation}])
-        return response['message']['content']
-    except Exception as e:
-        print(f"Error getting response from Ollama: {e}")
-        return "Sorry, I couldn't think of a response right now."
+        reply = ollama_client.chat(model=desired_model, messages=conversation)
+        return reply["message"]["content"]
+    except (ReqConnectionError, ConnectionError):
+        return "couldn't find ollama"
+    except Exception as exc:
+        print(f"[ERROR] Unexpected error from Ollama: {exc}")
+        return "Sorry, we couldn't think of a response right now."
+
+
+def split_message(text: str, max_len: int = 2000) -> list[str]:
+    return [text[i:i + max_len] for i in range(0, len(text), max_len)]
+
+
+def remove_thinking_sections(text: str) -> str:
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 
-
-def split_message(message, max_length=2000):
-    """Split a long message into chunks of max_length."""
-    chunks = [message[i:i + max_length] for i in range(0, len(message), max_length)]
-    return chunks
-
-
-def remove_thinking(message):
-    """Removes <think>...</think> sections from the response."""
-    return re.sub(r'<think>.*?</think>', '', message, flags=re.DOTALL).strip()
-
-#when the bot is ready, do this
+# ---------------------------------------------------------------------------
+#  Discord event hooks
+# ---------------------------------------------------------------------------
 @client.event
 async def on_ready():
-    print(f'Logged in as {client.user}')
+    print(f"Logged in as {client.user} (ID: {client.user.id})")
+    print(f"Listening in channel {TARGET_CHANNEL_ID} – Ctrl‑C to quit")
 
-#when a message is received, do this
+
 @client.event
-async def on_message(message):
-    #dont respond to bots own messages
+async def on_message(message: discord.Message):
     if message.author == client.user:
         return
 
-    #debug info for terminal, not necessary but recommended to keep on
-    print(f"Received message: {message.content} from {message.author.name} in channel {message.channel.id}")
+    if message.channel.id != TARGET_CHANNEL_ID or client.user not in message.mentions:
+        return
 
-    #checks for pings in the channel specified
-    if message.channel.id == target_channel_id:
-        if client.user in message.mentions:
-            #get message
-            user_message = message.content
-            user_message = user_message.replace(f"<@!{client.user.id}>", "").replace(f"<@{client.user.id}>", "").strip()
+    cleaned = (
+        message.content.replace(f"<@!{client.user.id}>", "")
+        .replace(f"<@{client.user.id}>", "")
+        .strip()
+    )
 
-            #debug info for terminal, not necessary but recommended to keep on
-            print(f"User message: {user_message}")
+    if message.author.id not in user_messages:
+        user_messages[message.author.id] = deque(maxlen=4)
+    user_messages[message.author.id].append(cleaned)
 
-            if message.author.id not in user_messages:
-                user_messages[message.author.id] = deque(maxlen=2)  #keeps this many number of messages. should be same as the one further above.
-            user_messages[message.author.id].append(user_message)
+    raw_reply = generate_response(message.author.id, cleaned)
+    raw_reply = remove_thinking_sections(raw_reply)
 
-            roleplay_response = generate_response(message.author.id, user_message)
+    for chunk in split_message(raw_reply):
+        await message.channel.send(chunk)
 
-            print(f"Original response: {roleplay_response}")
 
-            roleplay_response = remove_thinking(roleplay_response)
 
-            response_chunks = split_message(roleplay_response)
-
-            # Send the response in chunks
-            for chunk in response_chunks:
-                await message.channel.send(chunk)
-                
-# Start the bot
-client.run(DISCORD_TOKEN)
+# ---------------------------------------------------------------------------
+#  Main
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    client.run(DISCORD_TOKEN)
