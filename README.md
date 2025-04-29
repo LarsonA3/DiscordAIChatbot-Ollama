@@ -10,3 +10,5 @@ REQUIREMENTS:
 These are required for the program to run properly.
 
 Note that your choice of ollama model is very important. If you are on a weaker system, consider using a model with a smaller context size that takes up less resources. If responses are lackluster, consider using a higher context size model should your system allow for it.
+
+Change the .env file as well as the character description located in bot.py.
